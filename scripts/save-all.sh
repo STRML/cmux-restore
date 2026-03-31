@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
 # Save all current Claude sessions from cmux for later restoration.
 #
-# For each running Claude process:
-# 1. Reads CMUX_SURFACE_ID from its environment (via `ps eww`)
-# 2. Looks up the correct session_id from the SessionStart hook's state file
-# 3. Falls back to most-recently-modified .jsonl if hook data is missing
+# Saves two lists:
+# 1. Claude processes: {cwd, session_id} — from ps + lsof + hook state
+# 2. Claude surfaces: {title, ref, workspace} — from cmux tree
 #
-# Surface UUIDs persist across cmux restarts, so cmux-restore can target
-# each surface directly without position matching or screen parsing.
+# These are paired at restore time by matching surface titles to surfaces
+# in the (possibly restarted) cmux tree.
 #
 # Output: ~/.claude/cmux-snapshot.json
 set -euo pipefail
@@ -22,52 +21,62 @@ if [ -f "$STATE_FILE" ]; then
   HOOK_DATA=$(jq '.by_surface // {}' "$STATE_FILE")
 fi
 
+# --- Get cmux tree ---
+echo "Reading cmux tree..."
+TREE=$(cmux tree --all --json 2>/dev/null) || { echo "cmux not available"; exit 1; }
+
+# All Claude surfaces (title starts with [)
+SURFACES=$(echo "$TREE" | jq '[
+  .windows[]?.workspaces[]? |
+  .title as $ws |
+  .panes[]? |
+  .surfaces[]? |
+  select(.title | test("^\\[")) |
+  {ref: .ref, title: .title, workspace: $ws}
+]')
+
 echo "Scanning Claude processes..."
 
-# --- For each Claude PID: get surface UUID, pair with hook-saved session_id ---
-ENTRIES='[]'
-SEEN_SURFACES=""
+# --- Collect sessions ---
+SESSIONS='[]'
+SEEN=""
 
 for pid in $(ps -eo pid,comm | awk '$2 == "claude" {print $1}'); do
   cwd=$(lsof -p "$pid" -Fn 2>/dev/null | grep -A1 "^fcwd" | grep "^n" | sed 's/^n//') || true
   [ -z "$cwd" ] && continue
 
-  surface_uuid=$(ps eww -p "$pid" 2>/dev/null | tr ' ' '\n' | grep "^CMUX_SURFACE_ID=" | cut -d= -f2) || true
-  [ -z "$surface_uuid" ] && continue
+  uuid=$(ps eww -p "$pid" 2>/dev/null | tr ' ' '\n' | grep "^CMUX_SURFACE_ID=" | cut -d= -f2) || true
+  [ -z "$uuid" ] && continue
+  echo "$SEEN" | grep -qF "$uuid" && continue
+  SEEN="$SEEN $uuid"
 
-  # Dedupe by surface UUID
-  echo "$SEEN_SURFACES" | grep -qF "$surface_uuid" && continue
-  SEEN_SURFACES="$SEEN_SURFACES $surface_uuid"
-
-  # Prefer hook-saved session_id (accurate per-surface)
-  session_id=$(echo "$HOOK_DATA" | jq -r --arg uuid "$surface_uuid" '.[$uuid].session_id // empty')
-
-  # Fallback: most recent .jsonl (unreliable with multiple sessions per project)
-  if [ -z "$session_id" ]; then
-    proj_name=$(echo "$cwd" | sed 's|/|-|g')
-    proj_dir="$HOME/.claude/projects/$proj_name"
-    session_id=$(ls -t "$proj_dir"/*.jsonl 2>/dev/null | head -1 | xargs -I{} basename {} .jsonl 2>/dev/null) || true
+  sid=$(echo "$HOOK_DATA" | jq -r --arg u "$uuid" '.[$u].session_id // empty')
+  if [ -z "$sid" ]; then
+    proj=$(echo "$cwd" | sed 's|/|-|g')
+    sid=$(ls -t "$HOME/.claude/projects/$proj"/*.jsonl 2>/dev/null | head -1 | xargs -I{} basename {} .jsonl 2>/dev/null) || true
   fi
+  [ -z "$sid" ] && continue
 
-  [ -z "$session_id" ] && continue
-
-  ENTRIES=$(echo "$ENTRIES" | jq \
-    --arg uuid "$surface_uuid" \
-    --arg cwd "$cwd" \
-    --arg sid "$session_id" \
-    '. + [{surface_uuid: $uuid, cwd: $cwd, session_id: $sid}]')
+  SESSIONS=$(echo "$SESSIONS" | jq \
+    --arg cwd "$cwd" --arg sid "$sid" \
+    '. + [{cwd: $cwd, session_id: $sid}]')
 done
 
-COUNT=$(echo "$ENTRIES" | jq 'length')
-echo "Found $COUNT Claude sessions"
+COUNT=$(echo "$SESSIONS" | jq 'length')
+SURF_COUNT=$(echo "$SURFACES" | jq 'length')
+echo "Found $COUNT sessions, $SURF_COUNT Claude surfaces"
 
-# --- Save snapshot ---
 jq -n \
   --argjson ts "$NOW" \
-  --argjson entries "$ENTRIES" \
-  '{timestamp: $ts, sessions: $entries}' > "$SNAPSHOT_FILE"
+  --argjson sessions "$SESSIONS" \
+  --argjson surfaces "$SURFACES" \
+  '{timestamp: $ts, sessions: $sessions, surfaces: $surfaces}' > "$SNAPSHOT_FILE"
 
 echo ""
 echo "Snapshot saved to $SNAPSHOT_FILE"
 echo ""
-echo "$ENTRIES" | jq -r '.[] | "  \(.cwd | split("/") | .[-1])  →  \(.session_id | .[0:8])...  (\(.surface_uuid | .[0:8])...)"'
+echo "Sessions:"
+echo "$SESSIONS" | jq -r '.[] | "  \(.cwd | split("/") | .[-1])  →  \(.session_id | .[0:8])..."'
+echo ""
+echo "Surfaces:"
+echo "$SURFACES" | jq -r '.[] | "  [\(.workspace)] \(.title)"'

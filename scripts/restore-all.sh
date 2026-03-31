@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 # Restore Claude sessions into cmux surfaces after a restart.
 #
-# Reads the saved snapshot which maps surface UUIDs → session IDs.
-# UUIDs persist across cmux restarts, so we send `claude --resume <id>`
-# directly to each surface by UUID — no position matching or screen
-# parsing needed.
+# Finds saved surface titles in the current cmux tree (titles persist across restarts).
+# For each matched surface, sends `claude --continue` which resumes the most recent
+# session for that project directory.
 #
 # Usage:
 #   cmux-restore              # restore all (refuses if claude already running)
@@ -46,59 +45,71 @@ CLAUDE_COUNT=$(ps -eo comm | grep -c '^claude$' || true)
 if [ "$CLAUDE_COUNT" -gt 0 ] && ! $FORCE && ! $DRY_RUN; then
   echo ""
   echo "$CLAUDE_COUNT Claude process(es) already running."
-  echo "After a full restart, this should be 0."
   echo ""
   echo "Options:"
-  echo "  --force      restore anyway (skips surfaces with live Claude)"
+  echo "  --force      restore anyway"
   echo "  --dry-run    preview without restoring"
   exit 1
 fi
 
-# Build set of surface UUIDs that currently have Claude running
-BUSY_UUIDS=""
-if [ "$CLAUDE_COUNT" -gt 0 ]; then
-  for pid in $(ps -eo pid,comm | awk '$2 == "claude" {print $1}'); do
-    uuid=$(ps eww -p "$pid" 2>/dev/null | tr ' ' '\n' | grep "^CMUX_SURFACE_ID=" | cut -d= -f2) || true
-    [ -n "$uuid" ] && BUSY_UUIDS="$BUSY_UUIDS $uuid"
-  done
-fi
+# --- Load current cmux tree ---
+echo "Reading cmux tree..."
+CURRENT=$(cmux tree --all --json 2>/dev/null | jq '[
+  .windows[]?.workspaces[]? |
+  .title as $ws |
+  .panes[]? |
+  .surfaces[]? |
+  {ref: .ref, title: .title, workspace: $ws}
+]') || { echo "cmux not available"; exit 1; }
 
-# --- Restore each session ---
-SESSIONS=$(echo "$SNAPSHOT" | jq -r '.sessions')
-TOTAL=$(echo "$SESSIONS" | jq 'length')
+# --- Load saved surfaces ---
+SAVED_SURFACES=$(echo "$SNAPSHOT" | jq '.surfaces')
+
 echo ""
-echo "Sessions to restore: $TOTAL"
+echo "Surfaces to restore: $(echo "$SAVED_SURFACES" | jq 'length')"
 echo ""
 
 RESTORED=0
 SKIPPED=0
+FAILED=0
+CLAIMED_REFS=""
 
-for row in $(echo "$SESSIONS" | jq -r '.[] | @base64'); do
+for row in $(echo "$SAVED_SURFACES" | jq -r '.[] | @base64'); do
   S=$(echo "$row" | base64 -d)
-  uuid=$(echo "$S" | jq -r '.surface_uuid')
-  cwd=$(echo "$S" | jq -r '.cwd')
-  sid=$(echo "$S" | jq -r '.session_id')
-  dir=$(basename "$cwd")
+  title=$(echo "$S" | jq -r '.title')
+  old_ws=$(echo "$S" | jq -r '.workspace')
 
-  # Skip if Claude is already running in this surface
-  if echo "$BUSY_UUIDS" | grep -qF "$uuid"; then
-    echo "  LIVE  $dir — Claude already running, skipping"
-    SKIPPED=$((SKIPPED + 1))
+  # Find this title in the current tree (skip already-claimed refs)
+  MATCH=""
+  for mrow in $(echo "$CURRENT" | jq -r --arg t "$title" '[.[] | select(.title == $t)] | .[] | @base64'); do
+    M=$(echo "$mrow" | base64 -d)
+    mref=$(echo "$M" | jq -r '.ref')
+    if ! echo "$CLAIMED_REFS" | grep -qF "$mref"; then
+      MATCH="$M"
+      break
+    fi
+  done
+
+  if [ -z "$MATCH" ]; then
+    echo "  MISS  [$old_ws] $title"
+    FAILED=$((FAILED + 1))
     continue
   fi
 
+  target_ref=$(echo "$MATCH" | jq -r '.ref')
+  cur_ws=$(echo "$MATCH" | jq -r '.workspace')
+  CLAIMED_REFS="$CLAIMED_REFS $target_ref"
+
   if $DRY_RUN; then
-    echo "  DRY   $dir — cd \"$cwd\" && claude --resume ${sid:0:8}..."
+    echo "  DRY   [$cur_ws] $title → $target_ref — claude --continue"
   else
-    # Send cd + claude --resume to the surface by UUID
-    cmux send --surface "$uuid" "cd \"$cwd\" && claude --resume $sid" 2>/dev/null
-    if [ $? -eq 0 ]; then
-      cmux send-key --surface "$uuid" Enter 2>/dev/null
-      echo "  OK    $dir — resumed ${sid:0:8}..."
+    if timeout 5 cmux send --surface "$target_ref" "claude --continue" 2>/dev/null; then
+      timeout 5 cmux send-key --surface "$target_ref" Enter 2>/dev/null
+      echo "  OK    [$cur_ws] $title → $target_ref"
       RESTORED=$((RESTORED + 1))
     else
-      echo "  FAIL  $dir — surface $uuid not found"
-      SKIPPED=$((SKIPPED + 1))
+      echo "  FAIL  [$cur_ws] $title → $target_ref — send failed"
+      FAILED=$((FAILED + 1))
     fi
   fi
 done
@@ -107,5 +118,5 @@ echo ""
 if $DRY_RUN; then
   echo "Dry run complete. Run without --dry-run to restore."
 else
-  echo "Restored: $RESTORED  Skipped: $SKIPPED"
+  echo "Restored: $RESTORED  Skipped: $SKIPPED  Failed: $FAILED"
 fi
