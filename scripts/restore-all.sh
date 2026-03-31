@@ -34,15 +34,16 @@ SNAP_TS=$(echo "$SNAPSHOT" | jq -r '.timestamp')
 NOW=$(date +%s)
 AGE_MIN=$(( (NOW - SNAP_TS) / 60 ))
 AGE_HR=$(( AGE_MIN / 60 ))
+AGE_MIN_REM=$(( AGE_MIN % 60 ))
 if [ "$AGE_HR" -gt 0 ]; then
-  echo "Snapshot from ${AGE_HR}h ${AGE_MIN}m ago"
+  echo "Snapshot from ${AGE_HR}h ${AGE_MIN_REM}m ago"
 else
   echo "Snapshot from ${AGE_MIN}m ago"
 fi
 
 # --- Check for running Claude processes ---
 CLAUDE_COUNT=$(ps -eo comm | grep -c '^claude$' || true)
-if [ "$CLAUDE_COUNT" -gt 0 ] && ! $FORCE; then
+if [ "$CLAUDE_COUNT" -gt 0 ] && ! $FORCE && ! $DRY_RUN; then
   echo ""
   echo "$CLAUDE_COUNT Claude process(es) already running."
   echo "After a full restart, this should be 0."
