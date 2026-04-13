@@ -77,10 +77,10 @@ STATE=$(echo "$STATE" | jq \
 
 echo "$STATE" > "$STATE_FILE"
 
-# --- Update snapshot for cmux-restore ---
-SNAPSHOT_FILE="$HOME/.claude/cmux-snapshot.json"
-TREE=$(cmux tree --all --json 2>/dev/null) || true
-if [ -n "$TREE" ]; then
+# --- Update snapshot for cmux-restore (backgrounded to avoid lag) ---
+(
+  SNAPSHOT_FILE="$HOME/.claude/cmux-snapshot.json"
+  TREE=$(cmux tree --all --json 2>/dev/null) || exit 0
   SURFACES=$(echo "$TREE" | jq '[
     .windows[]?.workspaces[]? |
     {ws_title: .title, ws_ref: .ref} as $ws |
@@ -89,16 +89,13 @@ if [ -n "$TREE" ]; then
     select(.title | test("^\\[")) |
     {ref: .ref, title: .title, workspace: $ws.ws_title, workspace_ref: $ws.ws_ref}
   ]')
-
-  # Build sessions array from hook state
-  SESSIONS=$(echo "$STATE" | jq '[.by_surface | to_entries[] | .value | {cwd, session_id}]')
-
+  SESSIONS=$(cat "$STATE_FILE" | jq '[.by_surface | to_entries[] | .value | {cwd, session_id}]')
   jq -n \
     --argjson ts "$NOW" \
     --argjson sessions "$SESSIONS" \
     --argjson surfaces "$SURFACES" \
     '{timestamp: $ts, sessions: $sessions, surfaces: $surfaces}' > "$SNAPSHOT_FILE"
-fi
+) &
 
 # --- Output resume suggestion if applicable ---
 if [ -n "$SUGGEST_RESUME" ]; then
