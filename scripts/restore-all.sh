@@ -56,10 +56,10 @@ fi
 echo "Reading cmux tree..."
 CURRENT=$(cmux tree --all --json 2>/dev/null | jq '[
   .windows[]?.workspaces[]? |
-  .title as $ws |
+  {ws_title: .title, ws_ref: .ref} as $ws |
   .panes[]? |
   .surfaces[]? |
-  {ref: .ref, title: .title, workspace: $ws}
+  {ref: .ref, title: .title, workspace: $ws.ws_title, workspace_ref: $ws.ws_ref}
 ]') || { echo "cmux not available"; exit 1; }
 
 # --- Load saved surfaces ---
@@ -98,13 +98,14 @@ for row in $(echo "$SAVED_SURFACES" | jq -r '.[] | @base64'); do
 
   target_ref=$(echo "$MATCH" | jq -r '.ref')
   cur_ws=$(echo "$MATCH" | jq -r '.workspace')
+  ws_ref=$(echo "$MATCH" | jq -r '.workspace_ref')
   CLAIMED_REFS="$CLAIMED_REFS $target_ref"
 
   if $DRY_RUN; then
     echo "  DRY   [$cur_ws] $title → $target_ref — claude --continue"
   else
-    if timeout 5 cmux send --surface "$target_ref" "claude --continue" 2>/dev/null; then
-      timeout 5 cmux send-key --surface "$target_ref" Enter 2>/dev/null
+    if timeout 5 cmux send --workspace "$ws_ref" --surface "$target_ref" "claude --continue" 2>/dev/null; then
+      timeout 5 cmux send-key --workspace "$ws_ref" --surface "$target_ref" Enter 2>/dev/null
       echo "  OK    [$cur_ws] $title → $target_ref"
       RESTORED=$((RESTORED + 1))
     else

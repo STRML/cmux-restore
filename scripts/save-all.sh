@@ -28,11 +28,11 @@ TREE=$(cmux tree --all --json 2>/dev/null) || { echo "cmux not available"; exit 
 # All Claude surfaces (title starts with [)
 SURFACES=$(echo "$TREE" | jq '[
   .windows[]?.workspaces[]? |
-  .title as $ws |
+  {ws_title: .title, ws_ref: .ref} as $ws |
   .panes[]? |
   .surfaces[]? |
   select(.title | test("^\\[")) |
-  {ref: .ref, title: .title, workspace: $ws}
+  {ref: .ref, title: .title, workspace: $ws.ws_title, workspace_ref: $ws.ws_ref}
 ]')
 
 echo "Scanning Claude processes..."
