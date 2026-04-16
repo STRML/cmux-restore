@@ -116,6 +116,10 @@ echo "$STATE" > "$STATE_FILE"
     --argjson sessions "$SESSIONS" \
     --argjson surfaces "$SURFACES" \
     '{timestamp: $ts, sessions: $sessions, surfaces: $surfaces}' > "$SNAPSHOT_FILE"
+
+  # Rotate tiered backups (5 hourly + 5 daily + 2 weekly).
+  SELF=$(readlink -f "$0" 2>/dev/null || echo "$0")
+  bash "$(dirname "$SELF")/rotate-snapshot-backups.sh" >/dev/null 2>&1 || true
 ) &
 
 # --- Output resume suggestion if applicable ---

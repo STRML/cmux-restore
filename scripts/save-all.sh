@@ -85,6 +85,10 @@ jq -n \
 
 echo ""
 echo "Snapshot saved to $SNAPSHOT_FILE"
+
+# Rotate tiered backups (5 hourly + 5 daily + 2 weekly).
+bash "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/rotate-snapshot-backups.sh" >/dev/null 2>&1 || true
+
 echo ""
 echo "Surfaces:"
 echo "$SURFACES" | jq -r '.[] | "  [\(.workspace)] \(.title)  →  \(.session_id | .[0:8])..."'

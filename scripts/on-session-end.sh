@@ -63,6 +63,9 @@ echo "$STATE" > "$STATE_FILE"
     --argjson sessions "$SESSIONS" \
     --argjson surfaces "$SURFACES" \
     '{timestamp: $ts, sessions: $sessions, surfaces: $surfaces}' > "$SNAPSHOT_FILE"
+
+  SELF=$(readlink -f "$0" 2>/dev/null || echo "$0")
+  bash "$(dirname "$SELF")/rotate-snapshot-backups.sh" >/dev/null 2>&1 || true
 ) &
 
 exit 0
