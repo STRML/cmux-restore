@@ -16,11 +16,13 @@ chmod +x "$SCRIPT_DIR/scripts/"*.sh
 echo "  Linked cmux-save    → ~/bin/cmux-save"
 echo "  Linked cmux-restore → ~/bin/cmux-restore"
 
-# --- Install SessionStart hook ---
+# --- Install hooks ---
 HOOK_DIR="$HOME/.claude/hooks/session-restore"
 mkdir -p "$HOOK_DIR"
 ln -sf "$SCRIPT_DIR/scripts/on-session-start.sh" "$HOOK_DIR/on-session-start.sh"
+ln -sf "$SCRIPT_DIR/scripts/on-session-end.sh"   "$HOOK_DIR/on-session-end.sh"
 echo "  Linked hook → ~/.claude/hooks/session-restore/on-session-start.sh"
+echo "  Linked hook → ~/.claude/hooks/session-restore/on-session-end.sh"
 
 echo ""
 echo "Done! Now add this to your ~/.claude/settings.json hooks section:"
@@ -33,6 +35,18 @@ cat <<'EOF'
         {
           "type": "command",
           "command": "bash $HOME/.claude/hooks/session-restore/on-session-start.sh",
+          "timeout": 5
+        }
+      ]
+    }
+  ],
+  "SessionEnd": [
+    {
+      "matcher": "*",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "bash $HOME/.claude/hooks/session-restore/on-session-end.sh",
           "timeout": 5
         }
       ]

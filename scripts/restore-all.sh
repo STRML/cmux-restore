@@ -76,19 +76,30 @@ CLAIMED_REFS=""
 
 for row in $(echo "$SAVED_SURFACES" | jq -r '.[] | @base64'); do
   S=$(echo "$row" | base64 -d)
-  title=$(echo "$S" | jq -r '.title')
-  old_ws=$(echo "$S" | jq -r '.workspace')
+  title=$(echo "$S" | jq -r '.title // ""')
+  old_ws=$(echo "$S" | jq -r '.workspace // ""')
+  sid=$(echo "$S" | jq -r '.session_id // empty')
 
-  # Find this title in the current tree (skip already-claimed refs)
+  # Skip legacy entries with no session_id (nothing deterministic to resume).
+  if [ -z "$sid" ]; then
+    echo "  SKIP  [$old_ws] $title — no session_id (legacy snapshot)"
+    SKIPPED=$((SKIPPED + 1))
+    continue
+  fi
+
+  # Find this title in the current tree (skip already-claimed refs).
+  # Title-matching is necessary because surface refs/UUIDs don't survive cmux restart.
   MATCH=""
-  for mrow in $(echo "$CURRENT" | jq -r --arg t "$title" '[.[] | select(.title == $t)] | .[] | @base64'); do
-    M=$(echo "$mrow" | base64 -d)
-    mref=$(echo "$M" | jq -r '.ref')
-    if ! echo "$CLAIMED_REFS" | grep -qF "$mref"; then
-      MATCH="$M"
-      break
-    fi
-  done
+  if [ -n "$title" ]; then
+    for mrow in $(echo "$CURRENT" | jq -r --arg t "$title" '[.[] | select(.title == $t)] | .[] | @base64'); do
+      M=$(echo "$mrow" | base64 -d)
+      mref=$(echo "$M" | jq -r '.ref')
+      if ! echo "$CLAIMED_REFS" | grep -qF "$mref"; then
+        MATCH="$M"
+        break
+      fi
+    done
+  fi
 
   if [ -z "$MATCH" ]; then
     echo "  MISS  [$old_ws] $title"
@@ -100,13 +111,14 @@ for row in $(echo "$SAVED_SURFACES" | jq -r '.[] | @base64'); do
   cur_ws=$(echo "$MATCH" | jq -r '.workspace')
   ws_ref=$(echo "$MATCH" | jq -r '.workspace_ref')
   CLAIMED_REFS="$CLAIMED_REFS $target_ref"
+  cmd="claude --resume ${sid}"
 
   if $DRY_RUN; then
-    echo "  DRY   [$cur_ws] $title → $target_ref — claude --continue"
+    echo "  DRY   [$cur_ws] $title → $target_ref — $cmd"
   else
-    if timeout 5 cmux send --workspace "$ws_ref" --surface "$target_ref" "claude --continue" 2>/dev/null; then
+    if timeout 5 cmux send --workspace "$ws_ref" --surface "$target_ref" "$cmd" 2>/dev/null; then
       timeout 5 cmux send-key --workspace "$ws_ref" --surface "$target_ref" Enter 2>/dev/null
-      echo "  OK    [$cur_ws] $title → $target_ref"
+      echo "  OK    [$cur_ws] $title → $target_ref  (${sid:0:8}...)"
       RESTORED=$((RESTORED + 1))
     else
       echo "  FAIL  [$cur_ws] $title → $target_ref — send failed"

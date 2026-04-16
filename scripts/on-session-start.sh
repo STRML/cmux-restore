@@ -24,6 +24,12 @@ SURFACE_ID="${CMUX_SURFACE_ID:-${ITERM_SESSION_ID:-unknown}}"
 WORKSPACE_ID="${CMUX_WORKSPACE_ID:-unknown}"
 NOW=$(date +%s)
 
+# Resolve cmux surface/workspace refs (stable form used by cmux send).
+# Fast: single local socket round-trip. Safe to fail — fields are optional.
+IDENT=$(cmux identify 2>/dev/null || echo '{}')
+SURFACE_REF=$(echo "$IDENT" | jq -r '.caller.surface_ref // empty')
+WORKSPACE_REF=$(echo "$IDENT" | jq -r '.caller.workspace_ref // empty')
+
 # --- Read existing state ---
 if [ -f "$STATE_FILE" ]; then
   STATE=$(cat "$STATE_FILE")
@@ -64,7 +70,11 @@ ENTRY=$(jq -n \
   --arg cwd "$CWD" \
   --arg surface "$SURFACE_ID" \
   --arg workspace "$WORKSPACE_ID" \
-  '{session_id: $sid, timestamp: $ts, cwd: $cwd, surface_id: $surface, workspace_id: $workspace}')
+  --arg surface_ref "$SURFACE_REF" \
+  --arg workspace_ref "$WORKSPACE_REF" \
+  '{session_id: $sid, timestamp: $ts, cwd: $cwd,
+    surface_id: $surface, workspace_id: $workspace,
+    surface_ref: $surface_ref, workspace_ref: $workspace_ref}')
 
 STATE=$(echo "$STATE" | jq \
   --arg surface "$SURFACE_ID" \
@@ -81,15 +91,26 @@ echo "$STATE" > "$STATE_FILE"
 (
   SNAPSHOT_FILE="$HOME/.claude/cmux-snapshot.json"
   TREE=$(cmux tree --all --json 2>/dev/null) || exit 0
-  SURFACES=$(echo "$TREE" | jq '[
-    .windows[]?.workspaces[]? |
-    {ws_title: .title, ws_ref: .ref} as $ws |
-    .panes[]? |
-    .surfaces[]? |
-    select(.title | test("^\\[")) |
-    {ref: .ref, title: .title, workspace: $ws.ws_title, workspace_ref: $ws.ws_ref}
-  ]')
-  SESSIONS=$(cat "$STATE_FILE" | jq '[.by_surface | to_entries[] | .value | {cwd, session_id}]')
+  STATE_NOW=$(cat "$STATE_FILE")
+  # Surfaces: one per live state entry, joined against tree for title/ref.
+  # Ignores refs that moved — state.surface_ref is source of truth for which
+  # session lives where (tree can have stale titles from ended sessions).
+  SURFACES=$(jq -n \
+    --argjson tree "$TREE" \
+    --argjson state "$STATE_NOW" \
+    '
+    [$tree.windows[]?.workspaces[]? |
+     {ws_title: .title, ws_ref: .ref} as $ws |
+     .panes[]?.surfaces[]? |
+     {ref: .ref, title: .title, workspace: $ws.ws_title, workspace_ref: $ws.ws_ref}
+    ] as $tree_surfaces |
+    [$state.by_surface | to_entries[] |
+     .value as $s |
+     ($tree_surfaces[] | select(.ref == $s.surface_ref)) as $ts |
+     {ref: $ts.ref, title: $ts.title, workspace: $ts.workspace,
+      workspace_ref: $ts.workspace_ref, session_id: $s.session_id, cwd: $s.cwd}
+    ]')
+  SESSIONS=$(echo "$STATE_NOW" | jq '[.by_surface | to_entries[] | .value | {cwd, session_id}]')
   jq -n \
     --argjson ts "$NOW" \
     --argjson sessions "$SESSIONS" \
